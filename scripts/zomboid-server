@@ -1,7 +1,10 @@
 #!/bin/bash
 # Dedicated server for the isolated instance, reachable over ZeroTier.
 #
-#   zomboid-server            start it (admin console stays in this terminal)
+#   zomboid-server            start the default server
+#   zomboid-server -s <name>  start another one
+#   zomboid-server -list      list the servers in this instance
+#   zomboid-server -new <name>  create a new server
 #   zomboid-server -stop      stop it, saving the world first
 #   zomboid-server -status    is it up, and what address to give your friends
 #   zomboid-server -config    open the server config folder
@@ -15,34 +18,73 @@
 set -u
 . "$(dirname "$(readlink -f "$0")")/_common.sh"
 
-PASSWORD_FILE="$INSTANCE_DIR/Server/admin-password.txt"
+PASSWORD_FILE="$INSTANCE_DIR/Server/$SERVER_NAME-admin-password.txt"
 
 case "${1:-}" in
+    -list)
+        printf "%-16s %-7s %-8s %s\n" SERVER PORT STATE WORLD
+        for sv in $(server_list); do
+            p=$(server_port_of "$sv")
+            if [ -n "$(server_pid_of "$sv")" ]; then st="up"; else st="down"; fi
+            sz=$(du -sh "$INSTANCE_DIR/Saves/Multiplayer/$sv" 2>/dev/null | cut -f1)
+            printf "%-16s %-7s %-8s %s\n" "$sv" "$p" "$st" "${sz:--}"
+        done
+        [ -z "$(server_list)" ] && echo "(none yet -- create one with: zomboid-server -new <name>)"
+        exit 0 ;;
+    -new)
+        NEW="${2:-}"
+        [ -z "$NEW" ] && { echo "usage: zomboid-server -new <name>"; exit 1; }
+        case "$NEW" in *[!A-Za-z0-9_-]*) echo "name: letters, digits, - and _ only"; exit 1 ;; esac
+        [ -f "$INSTANCE_DIR/Server/$NEW.ini" ] && { echo "'$NEW' already exists"; exit 1; }
+        # Same port as the others. Running one server at a time is the normal
+        # case, and it means friends always use the same address. To run two at
+        # once, change SERVER_PORT in the .instance and UDPPort in the .ini.
+        P=16261
+        mkdir -p "$INSTANCE_DIR/Server"
+        cat > "$INSTANCE_DIR/Server/$NEW.instance" <<CONF
+# server '$NEW' -- created $(date '+%Y-%m-%d %H:%M')
+SERVER_PORT=$P
+SERVER_RAM=6g
+CONF
+        echo "server '$NEW' created on port $P (same as the others)"
+        echo
+        echo "start it once so it writes its config:"
+        echo "  zomboid-server -s $NEW"
+        echo
+        echo "One server at a time: stop whichever is up before starting this one."
+        echo "To run two at once, change SERVER_PORT in"
+        echo "  $INSTANCE_DIR/Server/$NEW.instance"
+        echo "and UDPPort in its .ini, then open that port on the VPN zone."
+        exit 0 ;;
     -stop)
         P=$(server_pid)
         if [ -n "$P" ]; then
             # SIGTERM makes the server save the world before exiting.
-            kill "$P" && echo "stopping (PID $P), saving the world..."
+            kill "$P" && echo "stopping '$SERVER_NAME' (PID $P), saving the world..."
             for _ in $(seq 1 30); do
                 kill -0 "$P" 2>/dev/null || { echo "stopped."; exit 0; }
                 timeout 1 tail -f /dev/null
             done
             echo "still shutting down; give it a moment before starting again."
         else
-            echo "not running"
+            echo "'$SERVER_NAME' is not running"
         fi
         exit 0 ;;
     -status)
-        P=$(server_pid)
-        if [ -n "$P" ]; then
-            echo "up (PID $P)"
-            ZT=$(zerotier_ip)
-            [ -n "$ZT" ] && echo "friends connect to:  $ZT:$SERVER_PORT" \
-                         || echo "ZeroTier is down -- start it first"
-            ss -lunp 2>/dev/null | grep -E ":$SERVER_PORT" | sed 's/^/  /'
-        else
-            echo "down"
-        fi
+        ZT=$(zerotier_ip)
+        any=0
+        for sv in $(server_list); do
+            P=$(server_pid_of "$sv"); p=$(server_port_of "$sv")
+            if [ -n "$P" ]; then
+                any=1
+                echo "$sv: up (PID $P)"
+                [ -n "$ZT" ] && echo "   friends connect to:  $ZT:$p" \
+                             || echo "   ZeroTier is down -- start it first"
+            else
+                echo "$sv: down (port $p)"
+            fi
+        done
+        [ "$any" = 1 ] && ss -lunp 2>/dev/null | grep -E ":162[0-9]{2}" | sed 's/^/  /'
         exit 0 ;;
     -config)
         xdg-open "$INSTANCE_DIR/Server" >/dev/null 2>&1 &
@@ -53,15 +95,15 @@ case "${1:-}" in
         exit 0 ;;
     -service)
         mkdir -p ~/.config/systemd/user
-        cat > ~/.config/systemd/user/zomboid-server.service <<UNIT
+        cat > ~/.config/systemd/user/zomboid-server@.service <<UNIT
 [Unit]
-Description=Project Zomboid dedicated server (offline instance)
+Description=Project Zomboid dedicated server (%i)
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(readlink -f "$0")
-ExecStop=$(readlink -f "$0") -stop
+ExecStart=$(readlink -f "$0") -s %i
+ExecStop=$(readlink -f "$0") -s %i -stop
 # The world save on shutdown must not be interrupted.
 TimeoutStopSec=120
 Restart=on-failure
@@ -70,10 +112,10 @@ Restart=on-failure
 WantedBy=default.target
 UNIT
         systemctl --user daemon-reload
-        echo "service installed. Use:"
-        echo "   systemctl --user start zomboid-server"
-        echo "   systemctl --user enable zomboid-server   # start at login"
-        echo "   journalctl --user -u zomboid-server -f   # watch the log"
+        echo "service installed. For server '$SERVER_NAME':"
+        echo "   systemctl --user start  zomboid-server@$SERVER_NAME"
+        echo "   systemctl --user enable zomboid-server@$SERVER_NAME   # start at login"
+        echo "   journalctl --user -u zomboid-server@$SERVER_NAME -f"
         echo
         echo "Note: with the service you lose the interactive admin console."
         exit 0 ;;
@@ -82,9 +124,18 @@ UNIT
 esac
 
 if [ -n "$(server_pid)" ]; then
-    echo "a server is already running (PID $(server_pid)). Use -stop first."
+    echo "'$SERVER_NAME' is already running (PID $(server_pid)). Use -stop first."
     exit 1
 fi
+
+# two servers cannot share a port; say so before wasting a startup
+for sv in $(server_list); do
+    [ "$sv" = "$SERVER_NAME" ] && continue
+    if [ -n "$(server_pid_of "$sv")" ] && [ "$(server_port_of "$sv")" = "$SERVER_PORT" ]; then
+        echo "'$sv' already uses port $SERVER_PORT. Change SERVER_PORT in $SERVER_CONF."
+        exit 1
+    fi
+done
 
 mkdir -p "$INSTANCE_DIR/Server"
 if [ ! -f "$PASSWORD_FILE" ]; then

@@ -18,11 +18,11 @@ set -u
 case "${1:-}" in
     -list)
         echo "backups in $BACKUP_DIR:"
-        ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | while read -r f; do
+        ls -1t "$BACKUP_DIR/$SERVER_NAME"-*.tar.zst 2>/dev/null | while read -r f; do
             printf "  %-40s %8s  %s\n" "$(basename "$f")" \
                    "$(du -h "$f" | cut -f1)" "$(date -r "$f" '+%d/%m %H:%M')"
         done
-        [ -z "$(ls -A "$BACKUP_DIR"/*.tar.zst 2>/dev/null)" ] && echo "  (none yet)"
+        [ -z "$(ls -A "$BACKUP_DIR/$SERVER_NAME"-*.tar.zst 2>/dev/null)" ] && echo "  (none yet for '$SERVER_NAME')"
         exit 0 ;;
     -restore)
         if [ -n "$(server_pid)" ]; then
@@ -30,7 +30,7 @@ case "${1:-}" in
             echo "   zomboid-server -stop"
             exit 1
         fi
-        FILE="${2:-$(ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | head -1)}"
+        FILE="${2:-$(ls -1t "$BACKUP_DIR/$SERVER_NAME"-*.tar.zst 2>/dev/null | head -1)}"
         [ -f "$FILE" ] || { echo "no backup to restore"; exit 1; }
         echo "restoring: $(basename "$FILE")  ($(date -r "$FILE" '+%d/%m %H:%M'))"
         # The current world is never deleted: it is moved aside with a
@@ -89,7 +89,8 @@ tar --zstd -cf "$FILE" \
     "Server/$SERVER_NAME.ini" \
     "Server/${SERVER_NAME}_SandboxVars.lua" \
     "Server/${SERVER_NAME}_spawnregions.lua" \
-    "Server/${SERVER_NAME}_spawnpoints.lua" 2>/dev/null
+    "Server/${SERVER_NAME}_spawnpoints.lua" \
+    "Server/$SERVER_NAME.instance" 2>/dev/null
 
 if [ -s "$FILE" ]; then
     echo "backup: $(basename "$FILE")  ($(du -h "$FILE" | cut -f1), world $(du -sh "$WORLD_DIR" | cut -f1))"
@@ -97,6 +98,6 @@ else
     echo "FAILED"; rm -f "$FILE"; exit 1
 fi
 
-ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | tail -n +$((BACKUP_KEEP+1)) | while read -r old; do
+ls -1t "$BACKUP_DIR/$SERVER_NAME"-*.tar.zst 2>/dev/null | tail -n +$((BACKUP_KEEP+1)) | while read -r old; do
     rm -f "$old"; echo "  (removed old: $(basename "$old"))"
 done

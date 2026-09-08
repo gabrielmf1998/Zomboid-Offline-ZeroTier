@@ -141,3 +141,54 @@ bash install-client.sh                       # finds the game itself
 bash install-client.sh /path/to/ProjectZomboid   # or tell it where
 SERVER_IP=10.0.0.5 bash install-client.sh    # bake in your address
 ```
+
+---
+
+## Several servers in one instance
+
+One instance can hold as many servers as you like. They share the game folder
+and the `mods/` folder — no duplicated files — while each gets its own:
+
+- `Server/<name>.ini`, and therefore **its own `Mods=` line**
+- `Server/<name>_SandboxVars.lua`
+- `Saves/Multiplayer/<name>` — its own world
+- `Server/<name>.instance` — its port and heap size
+- its own generated admin password
+
+```bash
+zomboid-server -list            # what exists, port, up/down, world size
+zomboid-server -new duo         # create one
+zomboid-server -s duo           # start it
+zomboid-server -s duo -stop     # stop it, saving first
+
+zomboid-mods -s duo -enable a,b # a different mod list for this server
+zomboid-sandbox -s duo          # its own world settings
+zomboid-backup -s duo           # its own backups
+```
+
+Every script takes `-s <name>`, or reads `$ZOMBOID_SERVER`. With neither, they
+act on the default server.
+
+### Ports
+
+New servers reuse the same port, because the normal pattern is **one server at
+a time**: stop the one you are playing, start another. Sharing a port means
+your friends always connect to the same address whichever world you opened.
+
+Starting a second server while one is up is refused with a clear message rather
+than failing on a bound socket.
+
+To run two at once instead, give the second its own port: `SERVER_PORT` in its
+`.instance` file, `UDPPort` in its `.ini` (the game writes `16262` there no
+matter which port you picked — that one bites), and open the new port on the
+VPN zone.
+
+### systemd
+
+`-service` installs a **template** unit, so each server is its own instance:
+
+```bash
+systemctl --user start  zomboid-server@duo
+systemctl --user enable zomboid-server@duo
+journalctl --user -u zomboid-server@duo -f
+```

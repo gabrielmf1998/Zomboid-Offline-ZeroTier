@@ -58,7 +58,7 @@ case "${1:-}" in
     -package)
         ENABLED=$(grep "^Mods=" "$SERVER_INI" 2>/dev/null | cut -d= -f2- | tr ';' ' ')
         [ -z "$ENABLED" ] && { echo "no mods enabled on the server yet"; exit 1; }
-        ZIP="${BACKUP_DIR%/*}/mods-for-friends.zip"
+        ZIP="${BACKUP_DIR%/*}/mods-$SERVER_NAME.zip"
         rm -f "$ZIP"
         MISSING=""
         cd "$MODS_DIR" || exit 1
