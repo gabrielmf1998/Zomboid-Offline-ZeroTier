@@ -1,0 +1,126 @@
+#!/bin/bash
+# Dedicated server for the isolated instance, reachable over ZeroTier.
+#
+#   zomboid-server            start it (admin console stays in this terminal)
+#   zomboid-server -stop      stop it, saving the world first
+#   zomboid-server -status    is it up, and what address to give your friends
+#   zomboid-server -config    open the server config folder
+#   zomboid-server -password  show the generated admin password
+#   zomboid-server -service   install a systemd user service so it survives
+#                             the terminal closing
+#
+# Runs natively on Linux in -nosteam mode, which is what lets friends join by
+# direct IP. The world lives with the instance, under Saves/Multiplayer.
+
+set -u
+. "$(dirname "$(readlink -f "$0")")/_common.sh"
+
+PASSWORD_FILE="$INSTANCE_DIR/Server/admin-password.txt"
+
+case "${1:-}" in
+    -stop)
+        P=$(server_pid)
+        if [ -n "$P" ]; then
+            # SIGTERM makes the server save the world before exiting.
+            kill "$P" && echo "stopping (PID $P), saving the world..."
+            for _ in $(seq 1 30); do
+                kill -0 "$P" 2>/dev/null || { echo "stopped."; exit 0; }
+                timeout 1 tail -f /dev/null
+            done
+            echo "still shutting down; give it a moment before starting again."
+        else
+            echo "not running"
+        fi
+        exit 0 ;;
+    -status)
+        P=$(server_pid)
+        if [ -n "$P" ]; then
+            echo "up (PID $P)"
+            ZT=$(zerotier_ip)
+            [ -n "$ZT" ] && echo "friends connect to:  $ZT:$SERVER_PORT" \
+                         || echo "ZeroTier is down -- start it first"
+            ss -lunp 2>/dev/null | grep -E ":$SERVER_PORT" | sed 's/^/  /'
+        else
+            echo "down"
+        fi
+        exit 0 ;;
+    -config)
+        xdg-open "$INSTANCE_DIR/Server" >/dev/null 2>&1 &
+        echo "$INSTANCE_DIR/Server"; exit 0 ;;
+    -password)
+        [ -f "$PASSWORD_FILE" ] && cat "$PASSWORD_FILE" \
+            || echo "not created yet; start the server once"
+        exit 0 ;;
+    -service)
+        mkdir -p ~/.config/systemd/user
+        cat > ~/.config/systemd/user/zomboid-server.service <<UNIT
+[Unit]
+Description=Project Zomboid dedicated server (offline instance)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$(readlink -f "$0")
+ExecStop=$(readlink -f "$0") -stop
+# The world save on shutdown must not be interrupted.
+TimeoutStopSec=120
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+UNIT
+        systemctl --user daemon-reload
+        echo "service installed. Use:"
+        echo "   systemctl --user start zomboid-server"
+        echo "   systemctl --user enable zomboid-server   # start at login"
+        echo "   journalctl --user -u zomboid-server -f   # watch the log"
+        echo
+        echo "Note: with the service you lose the interactive admin console."
+        exit 0 ;;
+    -h|--help)
+        sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
+esac
+
+if [ -n "$(server_pid)" ]; then
+    echo "a server is already running (PID $(server_pid)). Use -stop first."
+    exit 1
+fi
+
+mkdir -p "$INSTANCE_DIR/Server"
+if [ ! -f "$PASSWORD_FILE" ]; then
+    tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16 > "$PASSWORD_FILE"
+    chmod 600 "$PASSWORD_FILE"
+    echo "admin password created: $(cat "$PASSWORD_FILE")   (stored in $PASSWORD_FILE)"
+fi
+
+cd "$GAME_DIR" || { echo "GAME_DIR not found: $GAME_DIR" >&2; exit 1; }
+export LD_LIBRARY_PATH="$GAME_DIR/natives:$GAME_DIR:$GAME_DIR/jre64-linux/lib:${LD_LIBRARY_PATH:-}"
+export LD_PRELOAD="${LD_PRELOAD:-}:libjsig.so"
+
+ZT=$(zerotier_ip)
+echo "server '$SERVER_NAME' starting with $SERVER_RAM of RAM"
+[ -n "$ZT" ] && echo "friends connect to:  $ZT:$SERVER_PORT" \
+             || echo "WARNING: ZeroTier is down -- LAN only"
+echo "world: $WORLD_DIR"
+echo
+
+exec jre64-linux/bin/java \
+    -Djava.awt.headless=true \
+    --enable-native-access=ALL-UNNAMED \
+    --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED \
+    -Xms"$SERVER_RAM" -Xmx"$SERVER_RAM" \
+    -XX:+UseZGC \
+    -Dzomboid.steam=0 \
+    -Dzomboid.znetlog=1 \
+    -Djava.library.path=./:./natives/ \
+    -Djava.security.egd=file:/dev/./urandom \
+    -XX:-OmitStackTraceInFastThrow \
+    -cp ./:projectzomboid.jar \
+    zombie/network/GameServer \
+    -cachedir="$INSTANCE_DIR" \
+    -servername "$SERVER_NAME" \
+    -adminusername admin \
+    -adminpassword "$(cat "$PASSWORD_FILE")" \
+    -port "$SERVER_PORT" \
+    -nosteam \
+    "$@"

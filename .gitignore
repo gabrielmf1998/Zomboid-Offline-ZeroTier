@@ -1,0 +1,5 @@
+config.sh
+backups/
+*.tar.zst
+*.zip
+*.log

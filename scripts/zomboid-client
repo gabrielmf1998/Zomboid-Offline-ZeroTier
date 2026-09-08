@@ -1,0 +1,90 @@
+#!/bin/bash
+# Launch the isolated Project Zomboid instance.
+#
+#   zomboid-client            native Linux, non-Steam mode (default, fastest)
+#   zomboid-client -win       the Windows build under Wine, Steam emulator on
+#   zomboid-client -saves     open this instance's save folder
+#   zomboid-client -console   show the game output in the terminal
+#
+# Any other argument is passed through to the game (e.g. -debug).
+#
+# Saves live in INSTANCE_DIR, never in ~/Zomboid, so a Steam install of the
+# same game is left completely untouched.
+
+set -u
+. "$(dirname "$(readlink -f "$0")")/_common.sh"
+
+MODE=native
+CONSOLE=0
+ARGS=()
+
+for a in "$@"; do
+    case "$a" in
+        -win|-wine|-windows) MODE=wine ;;
+        -console)            CONSOLE=1 ;;
+        -saves)
+            xdg-open "$INSTANCE_DIR" >/dev/null 2>&1 &
+            echo "$INSTANCE_DIR"; exit 0 ;;
+        -h|--help)
+            sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        *) ARGS+=("$a") ;;
+    esac
+done
+
+mkdir -p "$INSTANCE_DIR"
+cd "$GAME_DIR" || { echo "GAME_DIR not found: $GAME_DIR" >&2; exit 1; }
+LOG="$INSTANCE_DIR/client.log"
+
+if [ "$MODE" = wine ]; then
+    export WINEPREFIX="$WINE_PREFIX"
+    export WINEDEBUG=-all
+    [ -d "$WINEPREFIX" ] || { echo "creating Wine prefix..."; wineboot -u >/dev/null 2>&1; }
+
+    # On Windows -cachedir wants a Windows path; Z: is the Linux root.
+    WSAVES="Z:${INSTANCE_DIR//\//\\}"
+
+    CMD=(wine jre64/bin/java.exe
+        -Djava.awt.headless=true
+        --enable-native-access=ALL-UNNAMED
+        --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
+        -Xms"$CLIENT_RAM" -Xmx"$CLIENT_RAM"
+        -Dzomboid.steam=1
+        -Djava.library.path=./
+        -XX:+UseZGC
+        -XX:-CreateCoredumpOnCrash
+        -XX:-OmitStackTraceInFastThrow
+        -cp "./;projectzomboid.jar"
+        zombie.gameStates.MainScreenState
+        "-cachedir=$WSAVES"
+        "${ARGS[@]}")
+else
+    # -nosteam is mandatory to join a non-Steam dedicated server. A client left
+    # in Steam mode fails with "The server failed to respond".
+    export LD_LIBRARY_PATH="$GAME_DIR/natives:$GAME_DIR:$GAME_DIR/jre64-linux/lib:${LD_LIBRARY_PATH:-}"
+    export LD_PRELOAD="${LD_PRELOAD:-}:libjsig.so:libPZXInitThreads64.so"
+    export XMODIFIERS=
+    export SDL_VIDEODRIVER=x11
+
+    CMD=(jre64-linux/bin/java
+        -Djava.awt.headless=true
+        --enable-native-access=ALL-UNNAMED
+        --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED
+        -Xms"$CLIENT_RAM" -Xmx"$CLIENT_RAM"
+        -Dzomboid.steam=0
+        -Djava.library.path=natives/
+        -Djava.security.egd=file:/dev/./urandom
+        -XX:+UseZGC
+        -XX:-OmitStackTraceInFastThrow
+        -cp .:projectzomboid.jar
+        zombie.gameStates.MainScreenState
+        "-cachedir=$INSTANCE_DIR"
+        -nosteam
+        "${ARGS[@]}")
+fi
+
+echo "instance ($MODE) -- saves in $INSTANCE_DIR"
+if [ "$CONSOLE" = 1 ]; then
+    exec "${CMD[@]}" 2>&1 | tee "$LOG"
+else
+    exec "${CMD[@]}" >"$LOG" 2>&1
+fi

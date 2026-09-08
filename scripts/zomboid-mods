@@ -1,0 +1,95 @@
+#!/bin/bash
+# Move Steam Workshop mods into the offline instance and pick which the
+# server enables.
+#
+#   zomboid-mods                 list installed mods and the enabled ones
+#   zomboid-mods -install        copy every Workshop mod into the instance
+#   zomboid-mods -install <id>   copy a single Workshop item
+#   zomboid-mods -enable a,b,c   set the server's mod list (IDs, comma separated)
+#   zomboid-mods -enable         with no list: disable everything
+#   zomboid-mods -package        zip the enabled mods to send to your friends
+#
+# A -nosteam server has no Workshop channel, so mods never download by
+# themselves -- not for you and not for the people joining. Everyone needs the
+# same mod folders on disk, which is what -package is for.
+
+set -u
+. "$(dirname "$(readlink -f "$0")")/_common.sh"
+
+MODS_DIR="$INSTANCE_DIR/mods"
+
+# In Build 42 a mod.info can sit at <Mod>/mod.info, <Mod>/common/mod.info or
+# <Mod>/42/mod.info (some authors use 42.0). The 42 one wins for B42.
+mod_field() {
+    local dir="$1" field="$2" c
+    for c in "$dir/42/mod.info" "$dir/42.0/mod.info" "$dir/common/mod.info" "$dir/mod.info"; do
+        [ -f "$c" ] && { grep -m1 -i "^$field=" "$c" | cut -d= -f2- | tr -d '\r'; return; }
+    done
+}
+mod_id()   { mod_field "$1" id; }
+mod_name() { mod_field "$1" name; }
+
+case "${1:-}" in
+    -install)
+        mkdir -p "$MODS_DIR"
+        n=0
+        for d in "$WORKSHOP_DIR"/${2:-*}/; do
+            [ -d "$d/mods" ] || continue
+            for m in "$d"mods/*/; do
+                [ -d "$m" ] || continue
+                [ -n "$(find "$m" -maxdepth 2 -name mod.info -print -quit 2>/dev/null)" ] || continue
+                cp -a --no-target-directory "$m" "$MODS_DIR/$(basename "$m")"
+                n=$((n+1))
+            done
+        done
+        echo "$n mod(s) copied to $MODS_DIR"
+        ;;
+    -enable)
+        [ -f "$SERVER_INI" ] || { echo "server not created yet; run zomboid-server once"; exit 1; }
+        cp -n "$SERVER_INI" "$SERVER_INI.orig"
+        LIST="${2:-}"
+        # Project Zomboid separates mod IDs with ';'
+        sed -i "s/^Mods=.*/Mods=${LIST//,/;}/" "$SERVER_INI"
+        grep "^Mods=" "$SERVER_INI"
+        echo "(restart the server to apply)"
+        echo "NOTE: disabling a mod also deletes its section from the sandbox file."
+        echo "      Re-enabling it brings back the author's defaults, not your tuning."
+        ;;
+    -package)
+        ENABLED=$(grep "^Mods=" "$SERVER_INI" 2>/dev/null | cut -d= -f2- | tr ';' ' ')
+        [ -z "$ENABLED" ] && { echo "no mods enabled on the server yet"; exit 1; }
+        ZIP="${BACKUP_DIR%/*}/mods-for-friends.zip"
+        rm -f "$ZIP"
+        MISSING=""
+        cd "$MODS_DIR" || exit 1
+        for m in $ENABLED; do
+            # The folder name is often NOT the mod ID (folder "Furry" holds
+            # FurryModB42), so resolve the folder by reading mod.info.
+            FOLDER=""
+            for cand in */; do
+                cand="${cand%/}"
+                [ "$(mod_id "$cand")" = "$m" ] && { FOLDER="$cand"; break; }
+            done
+            [ -z "$FOLDER" ] && [ -d "$m" ] && FOLDER="$m"
+            if [ -n "$FOLDER" ]; then zip -qr "$ZIP" "$FOLDER"; else MISSING="$MISSING $m"; fi
+        done
+        echo "package: $ZIP  ($(du -h "$ZIP" | cut -f1))"
+        [ -n "$MISSING" ] && echo "WARNING: no folder found for:$MISSING"
+        echo "they unzip it inside their own instance's Zomboid/mods/"
+        ;;
+    -h|--help)
+        sed -n '2,14p' "$0" | sed 's/^# \?//'
+        ;;
+    *)
+        echo "== mods installed in the instance =="
+        for m in "$MODS_DIR"/*/; do
+            [ -d "$m" ] || continue
+            printf "  %-34s %s\n" "$(mod_id "${m%/}")" "$(mod_name "${m%/}")"
+        done
+        [ -z "$(ls -A "$MODS_DIR" 2>/dev/null)" ] && echo "  (none -- run: zomboid-mods -install)"
+        echo
+        echo "== enabled on the server =="
+        grep "^Mods=" "$SERVER_INI" 2>/dev/null | cut -d= -f2- | tr ';' '\n' | sed 's/^/  /' | grep -v '^  $'
+        grep -q "^Mods=$" "$SERVER_INI" 2>/dev/null && echo "  (none)"
+        ;;
+esac

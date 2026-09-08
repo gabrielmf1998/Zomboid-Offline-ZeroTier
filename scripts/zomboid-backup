@@ -1,0 +1,102 @@
+#!/bin/bash
+# Snapshot the server world and its configuration.
+#
+#   zomboid-backup             take a backup now
+#   zomboid-backup -list       list existing backups
+#   zomboid-backup -restore    restore the newest one (server must be stopped)
+#   zomboid-backup -restore <file>   restore a specific one
+#   zomboid-backup -auto       enable an automatic backup every 15 minutes
+#   zomboid-backup -auto-off   disable it
+#
+# Keeps world + ini + sandbox + spawn files. Rotates, keeping BACKUP_KEEP.
+# The filename records whether the server was running: a backup taken while
+# the server is up can catch a file mid-write, so "stopped" ones are safer.
+
+set -u
+. "$(dirname "$(readlink -f "$0")")/_common.sh"
+
+case "${1:-}" in
+    -list)
+        echo "backups in $BACKUP_DIR:"
+        ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | while read -r f; do
+            printf "  %-40s %8s  %s\n" "$(basename "$f")" \
+                   "$(du -h "$f" | cut -f1)" "$(date -r "$f" '+%d/%m %H:%M')"
+        done
+        [ -z "$(ls -A "$BACKUP_DIR"/*.tar.zst 2>/dev/null)" ] && echo "  (none yet)"
+        exit 0 ;;
+    -restore)
+        if [ -n "$(server_pid)" ]; then
+            echo "ERROR: the server is running. Stop it first:"
+            echo "   zomboid-server -stop"
+            exit 1
+        fi
+        FILE="${2:-$(ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | head -1)}"
+        [ -f "$FILE" ] || { echo "no backup to restore"; exit 1; }
+        echo "restoring: $(basename "$FILE")  ($(date -r "$FILE" '+%d/%m %H:%M'))"
+        # The current world is never deleted: it is moved aside with a
+        # timestamp, so a wrong restore can still be undone.
+        if [ -d "$WORLD_DIR" ]; then
+            KEEP="$WORLD_DIR.before-restore-$(date +%Y%m%d-%H%M%S)"
+            mv "$WORLD_DIR" "$KEEP"
+            echo "current world kept as: $(basename "$KEEP")"
+        fi
+        tar --zstd -xf "$FILE" -C "$INSTANCE_DIR" && echo "restored." || echo "FAILED"
+        exit 0 ;;
+    -auto)
+        mkdir -p ~/.config/systemd/user
+        cat > ~/.config/systemd/user/zomboid-backup.service <<UNIT
+[Unit]
+Description=Project Zomboid offline instance backup
+
+[Service]
+Type=oneshot
+ExecStart=$(readlink -f "$0")
+UNIT
+        cat > ~/.config/systemd/user/zomboid-backup.timer <<UNIT
+[Unit]
+Description=Project Zomboid backup every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+        systemctl --user daemon-reload
+        systemctl --user enable --now zomboid-backup.timer
+        echo "automatic backup ENABLED (every 15 min)"
+        exit 0 ;;
+    -auto-off)
+        systemctl --user disable --now zomboid-backup.timer 2>/dev/null
+        echo "automatic backup disabled"
+        exit 0 ;;
+    -h|--help)
+        sed -n '2,14p' "$0" | sed 's/^# \?//'; exit 0 ;;
+esac
+
+[ -d "$WORLD_DIR" ] || { echo "world does not exist yet: $WORLD_DIR"; exit 1; }
+mkdir -p "$BACKUP_DIR"
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+if [ -n "$(server_pid)" ]; then STATE="running"; else STATE="stopped"; fi
+FILE="$BACKUP_DIR/$SERVER_NAME-$STAMP-$STATE.tar.zst"
+
+cd "$INSTANCE_DIR" || exit 1
+tar --zstd -cf "$FILE" \
+    "Saves/Multiplayer/$SERVER_NAME" \
+    "Server/$SERVER_NAME.ini" \
+    "Server/${SERVER_NAME}_SandboxVars.lua" \
+    "Server/${SERVER_NAME}_spawnregions.lua" \
+    "Server/${SERVER_NAME}_spawnpoints.lua" 2>/dev/null
+
+if [ -s "$FILE" ]; then
+    echo "backup: $(basename "$FILE")  ($(du -h "$FILE" | cut -f1), world $(du -sh "$WORLD_DIR" | cut -f1))"
+else
+    echo "FAILED"; rm -f "$FILE"; exit 1
+fi
+
+ls -1t "$BACKUP_DIR"/*.tar.zst 2>/dev/null | tail -n +$((BACKUP_KEEP+1)) | while read -r old; do
+    rm -f "$old"; echo "  (removed old: $(basename "$old"))"
+done
